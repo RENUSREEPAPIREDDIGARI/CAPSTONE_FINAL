@@ -5,14 +5,22 @@ import os
 from datetime import datetime
 from io import BytesIO
 
+import numpy as np
 import openai
 import pandas as pd
 import streamlit as st
 from openai import OpenAI
-from PIL import Image
+from PIL import Image, ImageEnhance
+from rembg import remove
 
 # Initialize SambaNova client
 client = OpenAI(
+    api_key="635091b0-62d7-4e56-a89f-a8f37080e6a6",
+    base_url="https://api.sambanova.ai/v1",
+)
+
+# Initialize OpenAI client
+openai_client = OpenAI(
     api_key="635091b0-62d7-4e56-a89f-a8f37080e6a6",
     base_url="https://api.sambanova.ai/v1",
 )
@@ -68,6 +76,30 @@ def find_similar_posts(product_type, tone, n=3):
         st.error(f"Error finding similar posts: {str(e)}")
         return []
 
+def enhance_image(image, brightness=1.0, contrast=1.0, sharpness=1.0):
+    """Enhance image using Pillow"""
+    try:
+        # Convert to RGB if image is in RGBA mode
+        if image.mode == 'RGBA':
+            image = image.convert('RGB')
+            
+        # Create an ImageEnhance object
+        enhancer = ImageEnhance.Brightness(image)
+        image = enhancer.enhance(brightness)
+        
+        # Enhance contrast
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(contrast)
+        
+        # Enhance sharpness
+        enhancer = ImageEnhance.Sharpness(image)
+        image = enhancer.enhance(sharpness)
+        
+        return image
+    except Exception as e:
+        st.error(f"Error enhancing image: {str(e)}")
+        return image
+
 def load_image_from_path(post):
     """Load image from local path only"""
     try:
@@ -83,11 +115,11 @@ def load_image_from_path(post):
             # Join with the current directory
             full_path = os.path.join(current_dir, local_path)
             
-            # Debug information
-            #st.write(f"Attempting to load image from: {full_path}")
-            
             if os.path.exists(full_path):
-                return Image.open(full_path)
+                image = Image.open(full_path)
+                # Enhance the image
+                enhanced_image = enhance_image(image, brightness=1.2, contrast=1.2, sharpness=1.5)
+                return enhanced_image
             else:
                 st.warning(f"Image file not found at: {full_path}")
         else:
@@ -221,6 +253,93 @@ Format the post with appropriate line breaks and spacing."""
         # Fallback to pattern-based generation if LLM fails
         return generate_content_from_patterns(similar_posts, product, brand, tone, description)
 
+def remove_background(image):
+    """Remove background from image using rembg"""
+    try:
+        # Convert PIL Image to bytes
+        img_byte_arr = BytesIO()
+        image.save(img_byte_arr, format='PNG')
+        img_byte_arr = img_byte_arr.getvalue()
+        
+        # Remove background
+        output = remove(img_byte_arr)
+        
+        # Convert back to PIL Image
+        return Image.open(BytesIO(output))
+    except Exception as e:
+        st.error(f"Error removing background: {str(e)}")
+        return image
+
+def add_background(image, background_color=(255, 255, 255)):
+    """Add a solid color background to an image"""
+    try:
+        # Ensure the image has an alpha channel
+        if image.mode != 'RGBA':
+            image = image.convert('RGBA')
+            
+        # Create a new image with the background color
+        background = Image.new('RGBA', image.size, background_color + (255,))  # Add alpha value
+        
+        # Create a composite image
+        composite = Image.alpha_composite(background, image)
+        
+        # Convert back to RGB for final output
+        return composite.convert('RGB')
+    except Exception as e:
+        st.error(f"Error adding background: {str(e)}")
+        return image
+
+def generate_background_from_prompt(prompt, size=(512, 512)):
+    """Generate a background image using SambaNova's Stable Diffusion model"""
+    try:
+        response = openai_client.images.generate(
+            model="stable-diffusion-v1-5",  # Using Stable Diffusion instead of DALL-E
+            prompt=f"A beautiful high quality background scene of {prompt}, professional photography, soft lighting, perfect for product photography, 8k, highly detailed",
+            size=f"{size[0]}x{size[1]}",
+            n=1,
+        )
+        
+        # Get the image URL from the response
+        image_url = response.data[0].url
+        
+        # Download the image
+        import requests
+        response = requests.get(image_url)
+        if response.status_code == 200:
+            background_image = Image.open(BytesIO(response.content))
+            return background_image
+        else:
+            st.error(f"Error downloading image: Status code {response.status_code}")
+            return None
+    except Exception as e:
+        st.error(f"Error generating background: {str(e)}")
+        return None
+
+def add_custom_background(image, background_image):
+    """Add a custom background image to the product image"""
+    try:
+        if background_image is None:
+            st.error("No background image was generated")
+            return add_background(image, (255, 255, 255))  # Fallback to white background
+            
+        # Ensure both images are in RGBA mode
+        if image.mode != 'RGBA':
+            image = image.convert('RGBA')
+        if background_image.mode != 'RGBA':
+            background_image = background_image.convert('RGBA')
+            
+        # Resize background to match product image size
+        background_image = background_image.resize(image.size, Image.LANCZOS)
+        
+        # Create a composite image
+        composite = Image.alpha_composite(background_image, image)
+        
+        return composite.convert('RGB')
+    except Exception as e:
+        st.error(f"Error adding custom background: {str(e)}")
+        # Fallback to white background if there's an error
+        return add_background(image, (255, 255, 255))
+
 # Main app header
 st.title('Social Media Content Generator')
 
@@ -242,11 +361,63 @@ with col2:
 st.subheader("Upload a product image")
 uploaded_file = st.file_uploader("Choose an image", type=['png', 'jpg', 'jpeg'])
 
+# Image Enhancement Controls
+if uploaded_file is not None:
+    st.subheader("Image Enhancement")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        brightness = st.slider("Brightness", 0.5, 2.0, 1.2, 0.1)
+    with col2:
+        contrast = st.slider("Contrast", 0.5, 2.0, 1.2, 0.1)
+    with col3:
+        sharpness = st.slider("Sharpness", 0.5, 2.0, 1.5, 0.1)
+    
+    # Background Options
+    st.subheader("Background Options")
+    background_option = st.radio(
+        "Choose background type:",
+        ["Solid Color", "AI Generated Background"],
+        horizontal=True
+    )
+    
+    if background_option == "Solid Color":
+        bg_color = st.color_picker("Background Color", "#FFFFFF")
+        bg_color_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+    else:
+        background_prompt = st.text_input(
+            "Enter background prompt (e.g., 'Christmas celebration', 'Summer beach', 'Professional office'):",
+            placeholder="Describe the background you want"
+        )
+        if background_prompt:
+            with st.spinner("Generating background..."):
+                background_image = generate_background_from_prompt(background_prompt)
+                if background_image:
+                    st.image(background_image, caption="Generated Background", use_container_width=True)
+
 if uploaded_file is not None and product and brand and tone:
     # Display uploaded image
     col1, col2 = st.columns([0.3, 0.7])
     with col1:
-        st.image(uploaded_file, caption='Uploaded Image', use_container_width=True)
+        # Process the uploaded image
+        uploaded_image = Image.open(uploaded_file)
+        
+        # Remove background
+        processed_image = remove_background(uploaded_image)
+        
+        # Add background based on selection
+        if background_option == "Solid Color":
+            processed_image = add_background(processed_image, bg_color_rgb)
+        else:
+            if background_prompt and 'background_image' in locals():
+                processed_image = add_custom_background(processed_image, background_image)
+            else:
+                # Fallback to white background if no AI background is generated
+                processed_image = add_background(processed_image, (255, 255, 255))
+        
+        # Enhance the image
+        enhanced_image = enhance_image(processed_image, brightness, contrast, sharpness)
+        st.image(enhanced_image, caption='Processed Image', use_container_width=True)
     
     with col2:
         if st.button("Generate Content"):
@@ -304,9 +475,20 @@ if uploaded_file is not None and product and brand and tone:
                 else:
                     st.warning("No similar posts found. Try different product type or tone.")
 
-
-
-
-
-
-
+# Add footer with custom styling
+st.markdown("""
+<style>
+.footer {
+    position: fixed;
+    left: 0;
+    bottom: 0;
+    width: 100%;
+    background-color: transparent;
+    color: grey;
+    text-align: center;
+    padding: 10px;
+    font-size: 14px;
+}
+</style>
+<div class="footer">Made with ❤️ using OpenAI</div>
+""", unsafe_allow_html=True)
