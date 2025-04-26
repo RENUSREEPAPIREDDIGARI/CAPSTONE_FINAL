@@ -1203,3 +1203,10 @@ def optimize_for_instagram(image, format_type="all"):
     except Exception as e:
         st.error(f"Error optimizing image: {str(e)}")
         return None
+
+
+
+
+
+
+
