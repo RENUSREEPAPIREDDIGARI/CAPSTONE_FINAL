@@ -25,6 +25,7 @@ from social_media import SocialMediaManager
 import boto3
 import base64
 import botocore
+from botocore.exceptions import ClientError
 
 import config
 
@@ -71,50 +72,24 @@ os.environ['AWS_ACCESS_KEY_ID'] = access_key
 os.environ['AWS_SECRET_ACCESS_KEY'] = secret_key
 os.environ['AWS_DEFAULT_REGION'] = region
 
-# Initialize Bedrock client
+# Initialize Bedrock client for both image and text generation
 try:
-    # Use default credential provider chain
     bedrock_client = boto3.client('bedrock-runtime')
-    
-    # Test the connection with a simple request
-    try:
-        response = bedrock_client.invoke_model(
-            modelId="amazon.titan-image-generator-v2:0",
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps({
-                "taskType": "TEXT_IMAGE",
-                "textToImageParams": {
-                    "text": "test",
-                    "width": 512,
-                    "height": 512,
-                    "numberOfImages": 1
-                }
-            })
-        )
-        st.sidebar.success("✅ AWS credentials loaded and verified")
-    except botocore.exceptions.ClientError as e:
-        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-        error_msg = e.response.get('Error', {}).get('Message', str(e))
-        
-        st.sidebar.error(f"❌ AWS Error: {error_code}")
-        if error_code == 'UnrecognizedClientException':
-            st.sidebar.warning("""
-            Authentication failed. Please verify:
-            1. Your AWS credentials are correct
-            2. Your AWS account has access to Bedrock
-            3. Bedrock is available in your region
-            4. You've accepted the Bedrock terms of service
-            """)
-        elif error_code == 'AccessDeniedException':
-            st.sidebar.warning("Access denied. Please check your IAM permissions.")
-        else:
-            st.sidebar.warning(f"Error: {error_msg}")
-        
-        bedrock_client = None
+    st.sidebar.success("✅ AWS credentials loaded and verified")
 except Exception as e:
     st.sidebar.error(f"❌ AWS Error: {str(e)}")
     bedrock_client = None
+
+# Initialize SambaNova client
+sambanova_api_key = os.getenv('SAMBANOVA_API_KEY')
+if sambanova_api_key:
+    sambanova_client = openai.OpenAI(
+        api_key=sambanova_api_key,
+        base_url="https://api.sambanova.ai/v1"
+    )
+else:
+    sambanova_client = None
+    st.warning("⚠️ SambaNova API key not found. Content will be generated using templates only.")
 
 # Load data mapping
 @st.cache_data
@@ -442,56 +417,53 @@ def load_image_from_path(post):
 
 def generate_template_content(product, brand, tone, description=None):
     """Generate content using templates as fallback"""
-    templates = {
-        'Professional': [
-            "Introducing our premium {product}: {description} Experience the excellence of {brand}.",
-            "Elevate your lifestyle with our exceptional {product}. {description} #premium #{brand}",
-            "Discover unmatched quality with our {product}. {description} Join the {brand} family."
-        ],
-        'Casual': [
-            "Check out our amazing {product}! {description} Love it? Get yours from {brand} 💫",
-            "Hey there! Meet our awesome {product}. {description} #lifestyle #{brand}",
-            "Looking for the perfect {product}? We've got you covered! {description} #{brand}"
-        ],
-        'Enthusiastic': [
-            "🌟 INCREDIBLE ALERT! Our {product} is here! {description} Join the {brand} revolution!",
-            "✨ Get ready to be AMAZED! Our {product} is a game-changer! {description} #{brand}",
-            "🔥 The wait is OVER! Experience our fantastic {product}! {description} #{brand}"
-        ],
-        'Sophisticated': [
-            "Indulge in excellence with our curated {product}. {description} A {brand} masterpiece.",
-            "Refined elegance meets innovation: our {product}. {description} #{brand} #luxury",
-            "Experience the epitome of sophistication with our {product}. {description} #{brand}"
+    try:
+        # Define templates for different tones
+        templates = {
+            'Professional': [
+                f"Introducing our premium {product}: {description if description else 'Experience excellence'}. Elevate your style with {brand}.",
+                f"Discover the perfect blend of quality and style with our {product}. {description if description else 'A masterpiece of craftsmanship'} by {brand}.",
+                f"Experience luxury redefined with our {product}. {description if description else 'Where innovation meets elegance'} by {brand}."
+            ],
+            'Casual': [
+                f"Hey there! Check out our amazing {product}! {description if description else 'Perfect for your everyday needs'} from {brand} 💫",
+                f"Looking for something special? Meet our {product}! {description if description else 'Designed for your lifestyle'} by {brand} ✨",
+                f"Your new favorite {product} is here! {description if description else 'Style meets comfort'} from {brand} 😍"
+            ],
+            'Enthusiastic': [
+                f"🌟 INCREDIBLE ALERT! Our {product} is here! {description if description else 'Game-changing innovation'} from {brand}!",
+                f"✨ Get ready to be AMAZED! Our {product} is a must-have! {description if description else 'Revolutionary design'} by {brand}!",
+                f"🔥 The wait is OVER! Experience our {product}! {description if description else 'Next-level performance'} from {brand}!"
+            ],
+            'Sophisticated': [
+                f"Indulge in excellence with our curated {product}. {description if description else 'A masterpiece of design'} by {brand}.",
+                f"Refined elegance meets innovation: our {product}. {description if description else 'Timeless sophistication'} from {brand}.",
+                f"Experience the epitome of luxury with our {product}. {description if description else 'Unparalleled craftsmanship'} by {brand}."
+            ]
+        }
+        
+        # Get templates for the selected tone, default to Professional if not found
+        tone_templates = templates.get(tone, templates['Professional'])
+        
+        # Select a template randomly
+        template = random.choice(tone_templates)
+        
+        # Add relevant hashtags
+        hashtags = [
+            f"#{brand.replace(' ', '')}",
+            f"#{product.replace(' ', '')}",
+            "#lifestyle",
+            "#quality",
+            "#premium"
         ]
-    }
-    
-    # Default to Professional if tone not found
-    tone_templates = templates.get(tone, templates['Professional'])
-    
-    # Select a template randomly
-    import random
-    template = random.choice(tone_templates)
-    
-    # Format the template
-    content = template.format(
-        product=product,
-        description=description if description else "",
-        brand=brand.replace(" ", "")  # Remove spaces for hashtag
-    )
-    
-    # Add some relevant hashtags
-    hashtags = [
-        f"#{brand.replace(' ', '')}",
-        f"#{product.replace(' ', '')}",
-        "#lifestyle",
-        "#quality",
-        "#premium"
-    ]
-    
-    # Add hashtags to content
-    content += "\n\n" + " ".join(hashtags[:5])
-    
-    return content
+        
+        # Add hashtags to content
+        content = template + "\n\n" + " ".join(hashtags[:5])
+        
+        return content
+    except Exception as e:
+        st.error(f"Error generating template content: {str(e)}")
+        return f"Introducing our {product} by {brand}. {description if description else 'Experience quality and style combined.'} #quality #style #trending"
 
 def generate_content_from_patterns(similar_posts, product, brand, tone, description=None):
     """Generate new content using patterns from similar posts and product description"""
@@ -551,38 +523,63 @@ def generate_content_from_patterns(similar_posts, product, brand, tone, descript
         st.error(f"Error generating content: {str(e)}")
         return None
 
-def generate_content_with_llm(similar_posts, product, brand, tone, description=None):
-    """Generate content using OpenAI API with fallback to templates"""
+def image_to_base64_str(image):
+    """Convert PIL Image to base64 string"""
+    buffered = BytesIO()
+    image.save(buffered, format="PNG")
+    return base64.b64encode(buffered.getvalue()).decode('utf-8')
+
+def generate_content_with_llm(similar_posts, product, brand, tone, description=None, product_image=None):
+    """Generate content using SambaNova's Llama model"""
     try:
-        if client and openai_api_key:
-            prompt = f"""Create a social media post for:
-            Product: {product}
-            Brand: {brand}
-            Tone: {tone}
-            Description: {description if description else 'A high-quality ' + product}
-            
-            The post should:
-            1. Be attention-grabbing
-            2. Match the {tone} tone
-            3. Include 3-5 relevant hashtags
-            4. Be optimized for social media
-            5. Include emojis where appropriate
-            6. Be under 200 characters (not counting hashtags)
-            """
-            
+        if sambanova_client and product_image:
             try:
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[
-                        {"role": "system", "content": "You are a professional social media content creator."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=150
+                # Convert product image to base64
+                image_base64 = image_to_base64_str(product_image)
+                
+                # Create the prompt
+                prompt = f"""Create a social media post for this product image:
+                Product: {product}
+                Brand: {brand}
+                Tone: {tone}
+                Description: {description if description else 'A high-quality ' + product}
+                
+                The post should:
+                1. Be attention-grabbing
+                2. Match the {tone} tone
+                3. Include 3-5 relevant hashtags
+                4. Be optimized for social media
+                5. Include emojis where appropriate
+                6. Be under 200 characters (not counting hashtags)
+                """
+                
+                # Prepare the messages with both text and image
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}}
+                        ]
+                    }
+                ]
+                
+                response = sambanova_client.chat.completions.create(
+                    model="Llama-4-Maverick-17B-128E-Instruct",
+                    messages=messages,
+                    temperature=0.1,
+                    top_p=0.1
                 )
-                return response.choices[0].message.content.strip()
-            except Exception as api_error:
-                st.warning(f"API error: {str(api_error)}. Using template-based generation.")
+                
+                content = response.choices[0].message.content.strip()
+                
+                if not content:
+                    raise Exception("Empty response from Llama")
+                    
+                return content
+                
+            except Exception as e:
+                st.warning(f"⚠️ Error with SambaNova API: {str(e)}. Using template-based generation.")
                 return generate_template_content(product, brand, tone, description)
         else:
             return generate_template_content(product, brand, tone, description)
@@ -730,68 +727,185 @@ def ensure_backgrounds_exist():
     except Exception as e:
         st.error(f"Error ensuring backgrounds exist: {str(e)}")
 
-def get_titan_ai_request_body(prompt, negative_prompt="", style="realistic"):
-    """Generate request body for Titan image generation"""
-    seed = random.randint(0, 2147483647)
-    body = {
-        "taskType": "TEXT_IMAGE",
-        "textToImageParams": {
-            "text": prompt,
-            "negativeText": negative_prompt,
-            "width": 1024,
-            "height": 576,
-            "numberOfImages": 1
-        },
-        "imageGenerationConfig": {
-            "numberOfImages": 1,
-            "quality": "premium",
-            "cfgScale": 8,
-            "seed": seed,
-            "style": style
-        }
-    }
-    return json.dumps(body)
-
-def generate_background(prompt, style="realistic"):
-    """Generate background using Amazon Bedrock's Titan Image Generator"""
+def get_titan_ai_request_body(prompt, negative_prompt="", style="realistic", image_str=None, mask_prompt=None, is_outpainting=False):
+    """Generate request body for Titan image generation with support for outpainting"""
     try:
-        body = get_titan_ai_request_body(prompt, style=style)
+        # Validate inputs
+        if not prompt or not isinstance(prompt, str):
+            raise ValueError("Invalid prompt provided")
+            
+        # Simple text-to-image request body that matches AWS CLI example
+        body = {
+            "textToImageParams": {
+                "text": prompt
+            },
+            "taskType": "TEXT_IMAGE",
+            "imageGenerationConfig": {
+                "cfgScale": 8,
+                "seed": 0,
+                "width": 1024,
+                "height": 1024,
+                "numberOfImages": 1
+            }
+        }
         
-        response = bedrock_client.invoke_model(
-            body=body,
-            modelId="amazon.titan-image-generator-v2:0",
-            accept="application/json",
-            contentType="application/json"
-        )
+        # Convert to JSON string
+        return json.dumps(body)
         
-        response_body = json.loads(response.get("body").read())
-        
-        # Debug the response
-        st.sidebar.write("Response body:", response_body)
-        
-        if "images" in response_body and response_body["images"]:
-            return base64_to_image(response_body["images"][0])
-        else:
-            st.error("No images found in response")
-            st.sidebar.write("Full response:", response_body)
-            return None
     except Exception as e:
-        st.error(f"Error generating background: {str(e)}")
-        st.sidebar.write("Error details:", str(e))
+        st.error(f"Error creating request body: {str(e)}")
         return None
 
-def base64_to_image(base64_string):
-    """Convert base64 string to PIL Image"""
+def generate_background(prompt, style="realistic", image_str=None, mask_prompt=None, is_outpainting=False):
+    """Generate background using Amazon Bedrock's Titan Image Generator with support for outpainting"""
     try:
-        if not base64_string:
-            st.error("Empty base64 string received")
+        # Validate input
+        if not prompt or not isinstance(prompt, str):
+            st.error("Invalid prompt provided")
             return None
             
-        image_data = base64.b64decode(base64_string)
-        return Image.open(BytesIO(image_data))
+        # Generate request body
+        body = get_titan_ai_request_body(
+            prompt=prompt,
+            style=style,
+            image_str=image_str,
+            mask_prompt=mask_prompt,
+            is_outpainting=is_outpainting
+        )
+        
+        if not body:
+            return None
+            
+        # Make the API call
+        try:
+            response = bedrock_client.invoke_model(
+                modelId="amazon.titan-image-generator-v2:0",
+                accept="application/json",
+                contentType="application/json",
+                body=body
+            )
+            
+            # Parse response
+            response_body = json.loads(response.get("body").read())
+            
+            # Validate response
+            if not response_body or "images" not in response_body:
+                st.error("Invalid response from AI model")
+                return None
+                
+            # Get the generated image
+            image_data = response_body["images"][0]
+            if not image_data:
+                st.error("No image data in response")
+                return None
+                
+            # Convert base64 to image
+            image = base64_to_image(image_data)
+            return image
+                
+        except botocore.exceptions.ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            error_msg = e.response.get('Error', {}).get('Message', str(e))
+            
+            st.error(f"❌ AWS Error: {error_code}")
+            st.error(f"Error details: {error_msg}")
+            st.error(f"Request body: {body}")  # Add this line to see the request body
+            return None
+            
     except Exception as e:
-        st.error(f"Error converting base64 to image: {str(e)}")
-        st.sidebar.write("Base64 string:", base64_string[:100] + "..." if base64_string else "None")
+        st.error(f"Error generating background: {str(e)}")
+        return None
+
+def resize_webcam_image(webcam_img):
+    """Resize webcam image to meet Titan model requirements"""
+    if webcam_img.width > 1408:
+        webcam_img = webcam_img.resize((1408, int(webcam_img.height * 1408 / webcam_img.width)))
+    if webcam_img.width < 256:
+        webcam_img = webcam_img.resize((256, int(webcam_img.height * 256 / webcam_img.width)))
+    if webcam_img.height < 256:
+        webcam_img = webcam_img.resize((int(webcam_img.width * 256 / webcam_img.height), 256))
+    return webcam_img
+
+def resize_image(upload_file):
+    """Resize uploaded image to meet Titan model requirements"""
+    image_bytes = upload_file.getvalue()
+    image = Image.open(BytesIO(image_bytes))
+    if image.width > 1408:
+        image = image.resize((1408, int(image.height * 1408 / image.width)))
+    return image
+
+def image_to_base64(image_path=None, upload_file=None):
+    """Convert an image file to a base64 string"""
+    if image_path:
+        with open(image_path, "rb") as img_file:
+            image_bytes = img_file.read()
+            base64_str = base64.b64encode(image_bytes).decode("utf-8")
+            
+    if upload_file:
+        with BytesIO() as byte_io:
+            upload_file.save(byte_io, format="PNG")
+            upload_file_bytes = byte_io.getvalue()
+        base64_str = base64.b64encode(upload_file_bytes).decode('utf-8')
+        
+    return base64_str
+
+def base64_to_image(base64_str):
+    """Convert a base64 string to an image object"""
+    image_bytes = base64.b64decode(base64_str)
+    image = Image.open(BytesIO(image_bytes))
+    return image
+
+def create_positioned_image(input_image, position):
+    """Create an image with the input image positioned according to the specified position"""
+    try:
+        # Check if the input is a file path or image data
+        if isinstance(input_image, str):
+            # Open the input image from the file path
+            input_image = Image.open(input_image)
+        else:
+            with io.BytesIO() as byte_arr:
+                input_image.save(byte_arr, format='PNG')
+                image_bytes = byte_arr.getvalue()
+                input_image = Image.open(BytesIO(image_bytes))
+
+        # Get the width and height of the input image
+        input_width, input_height = input_image.size
+
+        # Define the positions and their corresponding coordinates
+        positions = {
+            "top-left": (0, 0),
+            "top-middle": (input_width, 0),
+            "top-right": (input_width * 2, 0),
+            "middle-left": (0, input_height),
+            "middle-middle": (input_width, input_height),
+            "middle-right": (input_width * 2, input_height),
+            "bottom-left": (0, input_height * 2),
+            "bottom-middle": (input_width, input_height * 2),
+            "bottom-right": (input_width * 2, input_height * 2)
+        }
+
+        # Check if the provided position is valid
+        if position not in positions:
+            raise ValueError(f"Invalid position: {position}")
+
+        # Get the position coordinates
+        position_coords = positions[position]
+
+        # Create a new blank image with triple the size of the input image
+        output_width = input_width * 3
+        output_height = input_height * 3
+        output_image = Image.new("RGB", (output_width, output_height), color="black")
+
+        # Paste the input image at the specified position
+        output_image.paste(input_image, position_coords)
+        
+        # Resize the output image back to original dimensions
+        resized_output_image = output_image.resize((input_width, input_height))
+
+        return resized_output_image
+        
+    except Exception as e:
+        st.error(f"Error creating positioned image: {str(e)}")
         return None
 
 # Call this when the app starts
@@ -975,7 +1089,7 @@ if 'current_image' in st.session_state:
                 final_image = add_background(processed_image, bg_color_rgb)
             else:
                 if 'selected_background' in st.session_state:
-                    background_img = Image.open(st.session_state.selected_background)
+                    background_img = st.session_state.selected_background
                     final_image = add_custom_background(processed_image, background_img)
                     st.caption(st.session_state.get('background_attribution', ''))
                 else:
@@ -1016,7 +1130,15 @@ if 'current_image' in st.session_state:
             if st.button("✨ Create Post", type="primary"):
                 with st.spinner("Creating your content..."):
                     similar_posts = find_similar_posts(product, tone)
-                    new_content = generate_content_with_llm(similar_posts, product, brand, tone, description)
+                    # Pass the processed image to the content generator
+                    new_content = generate_content_with_llm(
+                        similar_posts, 
+                        product, 
+                        brand, 
+                        tone, 
+                        description,
+                        st.session_state.get('processed_image')
+                    )
                     if new_content:
                         st.session_state.generated_content = new_content
                         st.text_area("Generated Content", value=new_content, height=200)
